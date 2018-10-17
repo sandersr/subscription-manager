@@ -37,3 +37,4 @@ dist
 updates.img
 .vagrant
 vagrant/vagrant_data/*.iso
+src/dnf-plugins/product-id/Makefile
