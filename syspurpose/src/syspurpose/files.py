@@ -24,10 +24,29 @@ import os
 import io
 from syspurpose.utils import system_exit, create_dir, create_file, make_utf8, write_to_file_utf8
 from syspurpose.i18n import ugettext as _
+from syspurpose.sync import three_way_merge
 
 # Constants for locations of the two system syspurpose files
 USER_SYSPURPOSE = "/etc/rhsm/syspurpose/syspurpose.json"
 VALID_FIELDS = "/etc/rhsm/syspurpose/valid_fields.json"  # Will be used for future validation
+CACHED_SYSPURPOSE = "/var/lib/rhsm/cache/syspurpose.json" # Stores cached values
+
+# All names that represent syspurpose values locally
+ROLE = 'role'
+ADDONS = 'addons'
+SERVICE_LEVEL = 'service_level_agreement'
+USAGE = 'usage'
+
+# Remote values keyed on the local ones
+LOCAL_TO_REMOTE = {
+    ROLE: 'role',
+    ADDONS: 'addOns',
+    SERVICE_LEVEL: 'serviceLevel',
+    USAGE: 'usage'
+}
+
+# All known syspurpose attributes
+ATTRIBUTES = [ROLE, ADDONS, SERVICE_LEVEL, USAGE]
 
 
 class SyspurposeStore(object):
@@ -189,3 +208,246 @@ class SyspurposeStore(object):
             new_store.read_file()
 
         return new_store
+
+
+class SyncedStore(object):
+    """
+    Stores values in a local file backed by a cache which is then synced with another source
+    of the same values.
+    """
+    PATH = ""
+    CACHE_PATH = ""
+
+    def __init__(self, uep, on_changed=None):
+        self.uep = uep
+        self.filename = self.PATH.split('/')[-1]
+        self.path = self.PATH
+        self.cache_path = self.CACHE_PATH
+        self.local_file = None
+        self.local_contents = {}
+        self.cache_file = None
+        self.cache_contents = {}
+        self.changed = False
+        self.on_changed = on_changed
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.finsh()
+
+    def start(self):
+        self.local_file = open(self.path, 'w', encoding='utf-8')
+        self.cache_file = open(self.path, 'w', encoding='utf-8')
+        return self
+
+    def finish(self):
+        if self.changed:
+            self.sync()
+        self.local_file.close()
+        self.cache_file.close()
+
+    def sync(self):
+        local_contents = self.get_local_contents()
+        remote_contents = self.get_remote_contents()
+        cached_contents = self.get_cached_contents()
+
+        result = self.merge(local=local_contents,
+                            remote=remote_contents,
+                            base=cached_contents)
+
+        self.update_local(result)
+        self.update_cache(result)
+        self.update_remote(result)
+
+        # Reset the changed attribute as all items should be synced if we've gotten to this point
+        self.changed = False
+
+        return result
+
+    def merge(self, local=None, remote=None, base=None):
+        return three_way_merge(local=local, base=base, remote=remote,
+                                     on_change=self.on_changed)
+
+    def get_local_contents(self):
+        raise NotImplemented("To be implemented in subclasses")
+
+    def get_remote_contents(self):
+        raise NotImplemented("To be implemented in subclasses")
+
+    def get_cached_contents(self):
+        raise NotImplemented("To be implemented in subclasses")
+
+    def update_local(self, data):
+        write_to_file_utf8(self.local_file, data)
+
+    def update_cache(self, data):
+        write_to_file_utf8(self.cache_file, data)
+
+    def update_remote(self, data):
+        raise NotImplemented("To be implemented in subclasses")
+
+    def add(self, key, value):
+        """
+        Add a value to a list of values specified by key. If the current value specified by the key is scalar/non-list,
+        it is not overridden, but maintained in the list, along with the new value.
+        :param key: The name of the list
+        :param value: The value to append to the list
+        :return: None
+        """
+        value = make_utf8(value)
+        key = make_utf8(key)
+        try:
+            current_value = self.local_contents[key]
+            if current_value is not None and not isinstance(current_value, list):
+                self.local_contents[key] = [current_value]
+
+            if self.local_contents[key] is None:
+                self.local_contents[key] = []
+
+            if value not in self.local_contents[key]:
+                self.local_contents[key].append(value)
+            else:
+                return False
+        except (AttributeError, KeyError):
+            self.local_contents[key] = [value]
+        self.changed = True
+        return True
+
+    def remove(self, key, value):
+        """
+        Remove a value from a list specified by key.
+        If the current value specified by the key is not a list, unset the value.
+        :param key: The name of the list parameter to manipulate
+        :param value: The value to attempt to remove
+        :return: True if the value was in the list, False if it was not
+        """
+        value = make_utf8(value)
+        key = make_utf8(key)
+        try:
+            current_value = self.local_contents[key]
+            if current_value is not None and not isinstance(current_value, list) and current_value == value:
+                return self.unset(key)
+
+            if value in current_value:
+                self.local_contents[key].remove(value)
+            else:
+                return False
+            self.changed = True
+            return True
+        except (AttributeError, KeyError, ValueError):
+            return False
+
+    def unset(self, key):
+        """
+        Unsets a key
+        :param key: The key to unset
+        :return: boolean
+        """
+        key = make_utf8(key)
+
+        # Special handling is required for the SLA, since it deviates from the typical CP
+        # empty => null semantics
+        if key == 'service_level_agreement':
+            value = self.local_contents.get(key, None)
+            self.local_contents[key] = ''
+        else:
+            value = self.local_contents.pop(key, None)
+
+        if value is not None:
+            self.changed = True
+
+        return value is not None
+
+    def set(self, key, value):
+        """
+        Set a key (syspurpose parameter) to value
+        :param key: The parameter of the syspurpose file to set
+        :type key: str
+
+        :param value: The value to set that parameter to
+        :return: Whether any change was made
+        """
+        value = make_utf8(value)
+        key = make_utf8(key)
+        org = make_utf8(self.local_contents.get(key, None))
+        self.local_contents[key] = value
+
+        if org != value or org is None:
+            self.changed = True
+
+        return org != value or org is None
+
+
+class JsonSyncedStore(SyncedStore):
+
+    def get_local_contents(self):
+        self.local_file = open(self.path, 'w', encoding='utf-8')
+        return json.load(self.local_file)
+
+    def get_cached_contents(self):
+        self.cache_file = open(self.path, 'w', encoding='utf-8')
+        return json.load(self.cache_file)
+
+
+class UserSyspurposeStore(JsonSyncedStore):
+
+    PATH = USER_SYSPURPOSE
+    CACHE_PATH = CACHED_SYSPURPOSE
+
+    def __init__(self, uep, on_changed=None, consumer_uuid=None, report=None):
+        super(UserSyspurposeStore, self).__init__(uep, on_changed=on_changed)
+        self.consumer_uuid = consumer_uuid
+        self.report = report
+
+    def sync(self):
+        result = super(UserSyspurposeStore, self).sync()
+
+        if self.report is not None:
+            self.report._status = 'Successfully synced system purpose'
+
+        return result
+
+    def get_remote_contents(self):
+        consumer = self.uep.getConsumer(self.consumer_uuid)
+        result = {}
+
+        # Translate from the remote values to the local, filtering out items not known
+        for attr in ATTRIBUTES:
+            value = consumer.get(LOCAL_TO_REMOTE[attr])
+            if value is not None:
+                result[attr] = value
+
+        return result
+
+    def update_remote(self, data):
+        addons = data.get(ADDONS)
+        self.uep.updateConsumer(
+                self.consumer_uuid,
+                role=data.get(ROLE) or "",
+                addons=addons if addons is not None else [],
+                service_level=data.get(SERVICE_LEVEL) or "",
+                usage=data.get(USAGE) or ""
+        )
+
+
+def read_syspurpose(raise_on_error=False):
+    """
+    Reads the system purpose from the correct location on the file system.
+    Makes an attempt to use a SyspurposeStore if available falls back to reading the json directly.
+    :return: A dictionary containing the total syspurpose.
+    """
+    if SyspurposeStore is not None:
+        try:
+            syspurpose = SyspurposeStore.read(USER_SYSPURPOSE).contents
+        except (OSError, IOError):
+            syspurpose = {}
+    else:
+        try:
+            syspurpose = json.load(open(USER_SYSPURPOSE))
+        except (os.error, ValueError, IOError):
+            # In the event this file could not be read treat it as empty
+            if raise_on_error:
+                raise
+            syspurpose = {}
+    return syspurpose

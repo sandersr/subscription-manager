@@ -26,12 +26,18 @@ from rhsm.connection import ConnectionException
 from subscription_manager.cache import SyspurposeCache
 from subscription_manager import certlib
 from subscription_manager import injection as inj
-from subscription_manager.utils import three_way_merge
 
 import logging
 import json
 import os
 log = logging.getLogger(__name__)
+
+try:
+    from syspurpose.sync import sync
+except ImportError:
+    def sync(uep, consumer_uuid, command=None, report=None):
+        log.debug("Syspurpose module unavailable, not syncing")
+        return read_syspurpose()
 
 try:
     from syspurpose.files import SyspurposeStore, USER_SYSPURPOSE
@@ -42,23 +48,6 @@ except ImportError:
 
 store = None
 syspurpose = None
-
-# All names that represent syspurpose values locally
-ROLE = 'role'
-ADDONS = 'addons'
-SERVICE_LEVEL = 'service_level_agreement'
-USAGE = 'usage'
-
-# Remote values keyed on the local ones
-LOCAL_TO_REMOTE = {
-    ROLE: 'role',
-    ADDONS: 'addOns',
-    SERVICE_LEVEL: 'serviceLevel',
-    USAGE: 'usage'
-}
-
-# All known syspurpose attributes
-ATTRIBUTES = [ROLE, ADDONS, SERVICE_LEVEL, USAGE]
 
 
 def save_sla_to_syspurpose_metadata(service_level):
@@ -327,8 +316,10 @@ class SyspurposeSyncActionCommand(object):
         :return:
         """
         result = {}
+        consumer_uuid = inj.require(inj.IDENTITY).uuid
+
         try:
-            result = self.sync()
+            result = sync(self.uep, consumer_uuid, command=self.command, report=self.report)
         except ConnectionException as e:
             self.report._exceptions.append('Unable to sync syspurpose with server: %s' % str(e))
             self.report._status = 'Failed to sync system purpose'
@@ -338,57 +329,3 @@ class SyspurposeSyncActionCommand(object):
             return self.report
         else:
             return self.report, result
-
-    def sync(self):
-        """
-        Actually do the sync between client and server.
-        Saves the merged changes between client and server in the SyspurposeCache.
-        :return: The synced values
-        """
-        if not self.uep.has_capability('syspurpose') and self.command != 'service_level_agreement':
-            log.debug('Server does not support syspurpose, not syncing')
-            return read_syspurpose()
-
-        consumer_identity = inj.require(inj.IDENTITY)
-        consumer = self.uep.getConsumer(consumer_identity.uuid)
-
-        server_sp = {}
-        sp_cache = SyspurposeCache()
-        # Translate from the remote values to the local, filtering out items not known
-        for attr in ATTRIBUTES:
-            value = consumer.get(LOCAL_TO_REMOTE[attr])
-            if value is not None:
-                server_sp[attr] = value
-
-        try:
-            filesystem_sp = read_syspurpose(raise_on_error=True)
-        except (os.error, ValueError):
-            self.report._exceptions.append(
-                    'Cannot read local syspurpose, trying to update from server only'
-            )
-            result = server_sp
-            log.debug('Unable to read local system purpose at  \'%s\'\nUsing the server values.'
-                      % USER_SYSPURPOSE)
-        else:
-            cached_values = sp_cache.read_cache_only()
-            result = three_way_merge(local=filesystem_sp, base=cached_values, remote=server_sp,
-                                     on_change=self.report.record_change)
-
-        sp_cache.syspurpose = result
-        sp_cache.write_cache()
-
-        write_syspurpose(result)
-        addons = result.get(ADDONS)
-        self.uep.updateConsumer(
-                consumer_identity.uuid,
-                role=result.get(ROLE) or "",
-                addons=addons if addons is not None else "",
-                service_level=result.get(SERVICE_LEVEL) or "",
-                usage=result.get(USAGE) or ""
-        )
-
-        self.report._status = 'Successfully synced system purpose'
-
-        log.debug('Updated syspurpose located at \'%s\'' % USER_SYSPURPOSE)
-
-        return result

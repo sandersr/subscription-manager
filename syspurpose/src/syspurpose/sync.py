@@ -19,7 +19,11 @@ from __future__ import print_function, division, absolute_import
 This module contains utilities for syncing system syspurpose with candlepin server
 """
 
+import collections
 import os
+import logging
+from syspurpose.files import read_syspurpose, USER_SYSPURPOSE, SyspurposeStore, CACHED_SYSPURPOSE, \
+    ATTRIBUTES, LOCAL_TO_REMOTE, ROLE, ADDONS, USAGE, SERVICE_LEVEL
 
 # We do not want to have hard dependency on rhsm module nor subscription_manager
 try:
@@ -27,6 +31,9 @@ try:
     import rhsm.connection
     import rhsm.certificate2
     import rhsm.config
+    from subscription_manager.logutil import init_logger
+    init_logger()
+    log = logging.getLogger(__name__)
 except ImportError:
     rhsm = None
 
@@ -69,7 +76,7 @@ class SyspurposeSync(object):
         self.connection = None
         self.consumer_uuid = None
 
-    def send_syspurpose_to_candlepin(self, syspurpose_store):
+    def send_syspurpose_to_candlepin(self):
         """
         Try to sync system purpose to candlepin server.
         :param syspurpose_store: Instance of SystempurposeStore
@@ -106,15 +113,158 @@ class SyspurposeSync(object):
             consumer_uuid = consumer_cert.subject.get('CN')
 
             try:
-                self.connection.updateConsumer(
-                    uuid=consumer_uuid,
-                    role=syspurpose_store.contents.get('role') or '',
-                    addons=syspurpose_store.contents.get('addons') or [],
-                    service_level=syspurpose_store.contents.get('service_level_agreement') or '',
-                    usage=syspurpose_store.contents.get('usage') or ''
-                )
+                sync(self.connection, consumer_uuid)
             except Exception as err:
                 print('Unable to update consumer with system purpose: %s' % err)
                 return False
 
             return True
+
+
+# A simple container class used to hold the values representing a change detected
+# during three_way_merge
+DiffChange = collections.namedtuple('DiffChange', ['key', 'previous_value', 'new_value', 'source', 'in_base', 'in_result'])
+
+
+def three_way_merge(local, base, remote, on_conflict="remote", on_change=None):
+    """
+    Performs a three-way merge on the local and remote dictionaries with a given base.
+    :param local: The dictionary of the current local values
+    :param base: The dictionary with the values we've last seen
+    :param remote: The dictionary with "their" values
+    :param on_conflict: Either "remote" or "local" or None. If "remote", the remote changes
+                               will win any conflict. If "local", the local changes will win any
+                               conflict. If anything else, an error will be thrown.
+    :param on_change: This is an optional function which will be given each change as it is
+                      detected.
+    :return: The dictionary of values as merged between the three provided dictionaries.
+    """
+    result = {}
+    local = local or {}
+    base = base or {}
+    remote = remote or {}
+
+    if on_conflict == "remote":
+        winner = remote
+    elif on_conflict == "local":
+        winner = local
+    else:
+        raise ValueError('keyword argument "on_conflict" must be either "remote" or "local"')
+
+    if on_change is None:
+        on_change = lambda change: change
+
+    all_keys = set(local.keys()) | set(base.keys()) | set(remote.keys())
+
+    for key in all_keys:
+
+        local_changed = detect_changed(base=base, other=local, key=key)
+        remote_changed = detect_changed(base=base, other=remote, key=key)
+        changed = local_changed or remote_changed
+        source = 'base'
+
+        if local_changed == remote_changed:
+            source = on_conflict
+            if key in winner:
+                result[key] = winner[key]
+        elif remote_changed:
+            source = 'remote'
+            if key in remote:
+                result[key] = remote[key]
+        elif local_changed:
+            source = 'local'
+            if key in local:
+                result[key] = local[key]
+
+        if changed:
+            original = base.get(key)
+            diff = DiffChange(key=key, source=source, previous_value=original,
+                              new_value=result.get(key), in_base=key in base,
+                              in_result=key in result)
+            on_change(diff)
+
+    return result
+
+
+def detect_changed(base, other, key):
+    """
+    Detect the type of change that has occurred between base and other for a given key.
+    :param base: The dictionary of values we are starting with
+    :param other: The dictionary of now current values
+    :param key: The key that we are interested in knowing how it changed
+    :return: True if there was a change, false if there was no change
+    :rtype: bool
+    """
+    base = base or {}
+    other = other or {}
+
+    if key not in other.keys():
+        return False
+
+    base_val = base.get(key)
+    other_val = other.get(key)
+
+    return base_val != other_val
+
+
+def sync(uep, consumer_uuid, command=None, report=None):
+    """
+    Actually do the sync between client and server.
+    Saves the merged changes between client and server in the SyspurposeCache.
+    :return: The synced values
+    """
+    if not uep.has_capability('syspurpose') and command != 'service_level_agreement':
+        log.debug('Server does not support syspurpose, not syncing')
+        return read_syspurpose()
+
+    consumer = uep.getConsumer(consumer_uuid)
+
+    local_sp = read_syspurpose()
+    server_sp = {}
+    sp_cache = SyspurposeStore.read(CACHED_SYSPURPOSE)
+
+    # Translate from the remote values to the local, filtering out items not known
+    for attr in ATTRIBUTES:
+        value = consumer.get(LOCAL_TO_REMOTE[attr])
+        if value is not None:
+            server_sp[attr] = value
+
+    try:
+        filesystem_sp = read_syspurpose(raise_on_error=True)
+    except (os.error, ValueError):
+        if report is not None:
+            report._exceptions.append(
+                'Cannot read local syspurpose, trying to update from server only'
+            )
+        result = server_sp
+        log.debug('Unable to read local system purpose at  \'%s\'\nUsing the server values.'
+                  % USER_SYSPURPOSE)
+    else:
+        cached_values = sp_cache.contents
+        if report is not None:
+            result = three_way_merge(local=filesystem_sp, base=cached_values, remote=server_sp,
+                                     on_change=report.record_change)
+        else:
+            result = three_way_merge(local=filesystem_sp, base=cached_values, remote=server_sp)
+
+    sp_cache.contents = result
+    sp_cache.write()
+
+    local_sp.contents = result
+    local_sp.write()
+
+    addons = result.get(ADDONS)
+    uep.updateConsumer(
+            consumer_uuid,
+            role=result.get(ROLE) or "",
+            addons=addons if addons is not None else [],
+            service_level=result.get(SERVICE_LEVEL) or "",
+            usage=result.get(USAGE) or ""
+    )
+
+    if report is not None:
+        report._status = 'Successfully synced system purpose'
+
+    log.debug('Updated syspurpose located at \'%s\'' % USER_SYSPURPOSE)
+
+    return result
