@@ -44,8 +44,8 @@ set_target_properties(product-id PROPERTIES PREFIX "")
 
 target_link_libraries(product-id
     ${GLIB_LIBRARIES}
-    # TODO Using link libraries since I don't have libdnf on the normal ld path
-    ${LIBDNF_LINK_LIBRARIES}
+    # ${LIBDNF_LINK_LIBRARIES}
+    ${LIBDNF_LIBRARIES}
     ${ZLIB_LIBRARIES}
     ${OPENSSL_LIBRARIES}
     ${JSONC_LIBRARIES}
@@ -55,5 +55,13 @@ install(TARGETS product-id LIBRARY DESTINATION /usr/lib64/libdnf/plugins)
 
 enable_testing()
 add_executable(test-productdb test-productdb.c)
-target_link_libraries(test-productdb product-id)
+target_link_libraries(test-productdb
+    ${GLIB_LIBRARIES}
+    # ${LIBDNF_LINK_LIBRARIES}
+    ${LIBDNF_LIBRARIES}
+    ${ZLIB_LIBRARIES}
+    ${OPENSSL_LIBRARIES}
+    ${JSONC_LIBRARIES}
+    product-id
+)
 add_test(productdb test-productdb)
