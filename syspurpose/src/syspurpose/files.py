@@ -228,9 +228,11 @@ class SyncedStore(object):
         self.path = self.PATH
         self.cache_path = self.CACHE_PATH
         self.local_file = None
-        self.local_contents = {}
+        self.local_contents = None
+        self.local_contents = self.get_local_contents()
         self.cache_file = None
-        self.cache_contents = {}
+        self.cache_contents = None
+        self.cache_contents = self.get_cached_contents()
         self.changed = False
         self.on_changed = on_changed
         self.remote_updated = False
@@ -250,17 +252,17 @@ class SyncedStore(object):
         return False
 
     def sync(self):
-        local_contents = self.get_local_contents()
         remote_contents = self.get_remote_contents()
+        local_contents = self.get_local_contents()
         cached_contents = self.get_cached_contents()
 
         result = self.merge(local=local_contents,
                             remote=remote_contents,
                             base=cached_contents)
 
+        self.remote_updated = self.update_remote(result)
         self.local_updated = self.update_local(result)
         self.cache_updated = self.update_cache(result)
-        self.remote_updated = self.update_remote(result)
 
         # Reset the changed attribute as all items should be synced if we've gotten to this point
         self.changed = False
@@ -281,10 +283,12 @@ class SyncedStore(object):
         raise NotImplemented("To be implemented in subclasses")
 
     def update_local(self, data):
+        self.local_contents = data
         write_to_file_utf8(self.local_file, data)
         return True
 
     def update_cache(self, data):
+        self.cache_contents = data
         write_to_file_utf8(self.cache_file, data)
         return True
 
