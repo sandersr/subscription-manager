@@ -954,7 +954,7 @@ class EnvironmentsCommand(OrgCommand):
                                                   False)
         self._add_url_options()
 
-    def _get_enviornments(self, org):
+    def _get_environments(self, org):
         return self.cp.getEnvironmentList(org)
 
     def _do_command(self):
@@ -963,7 +963,7 @@ class EnvironmentsCommand(OrgCommand):
             self.cp_provider.set_user_pass(self.username, self.password)
             self.cp = self.cp_provider.get_basic_auth_cp()
             if self.cp.supports_resource('environments'):
-                environments = self._get_enviornments(self.org)
+                environments = self._get_environments(self.org)
 
                 if len(environments):
                     print("+-------------------------------------------+")
