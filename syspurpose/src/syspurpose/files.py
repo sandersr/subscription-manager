@@ -30,7 +30,7 @@ from syspurpose.i18n import ugettext as _
 # Constants for locations of the two system syspurpose files
 USER_SYSPURPOSE = "/etc/rhsm/syspurpose/syspurpose.json"
 VALID_FIELDS = "/etc/rhsm/syspurpose/valid_fields.json"  # Will be used for future validation
-CACHED_SYSPURPOSE = "/var/lib/rhsm/cache/syspurpose.json" # Stores cached values
+CACHED_SYSPURPOSE = "/var/lib/rhsm/cache/syspurpose.json"  # Stores cached values
 
 # All names that represent syspurpose values locally
 ROLE = 'role'
@@ -557,8 +557,8 @@ def three_way_merge(local, base, remote, on_conflict="remote", on_change=None):
 
     for key in all_keys:
 
-        local_changed = detect_changed(base=base, other=local, key=key)
-        remote_changed = detect_changed(base=base, other=remote, key=key)
+        local_changed = detect_changed(base=base, other=local, key=key, source="local")
+        remote_changed = detect_changed(base=base, other=remote, key=key, source="server")
         changed = local_changed or remote_changed
         source = 'base'
 
@@ -585,19 +585,22 @@ def three_way_merge(local, base, remote, on_conflict="remote", on_change=None):
     return result
 
 
-def detect_changed(base, other, key):
+def detect_changed(base, other, key, source="server"):
     """
     Detect the type of change that has occurred between base and other for a given key.
     :param base: The dictionary of values we are starting with
     :param other: The dictionary of now current values
     :param key: The key that we are interested in knowing how it changed
+    :param source: An optional string which indicates where the "other" values came from. Used to
+                   make decisions which are one sided. (i.e. only applicable for changes from the
+                   server side).
     :return: True if there was a change, false if there was no change
     :rtype: bool
     """
     base = base or {}
     other = other or {}
 
-    if key not in other.keys():
+    if key not in other.keys() and source != "local":
         return False
 
     base_val = base.get(key)
