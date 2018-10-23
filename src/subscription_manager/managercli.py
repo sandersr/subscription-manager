@@ -533,6 +533,13 @@ class SyspurposeCommand(CliCommand):
         self.commands = commands
         self.attr = attr
 
+        try:
+            from syspurpose.files import UserSyspurposeStore
+            uep = inj.require(inj.CP_PROVIDER).get_consumer_auth_cp()
+            self.store = UserSyspurposeStore(uep=uep, consumer_uuid=self.identity.uuid)
+        except ImportError:
+            self.store = None
+
         if 'set' in commands:
             self.parser.add_option(
                 "--set",
@@ -594,7 +601,8 @@ class SyspurposeCommand(CliCommand):
         )
 
     def _set(self, to_set):
-        raise NotImplementedError("To be implemented in subclasses")
+        if self.store:
+            self.store.set(self.attr, to_set)
 
     def unset(self):
         self._unset()
@@ -607,13 +615,13 @@ class SyspurposeCommand(CliCommand):
         )
 
     def _unset(self):
-        syspurposelib.unset(self.attr)
-        syspurposelib.write()
+        if self.store:
+            self.store.unset(self.attr)
 
     def add(self):
         self._add(self.options.to_add)
         success_msg = _("{attr} updated.").format(attr=self.name)
-        to_add = "--add " + "--add ".join(self.options.to_add)
+        to_add = "--add " + " --add ".join(self.options.to_add)
         command = "subscription-manager {name} ".format(name=self.name) + to_add
         self._check_result(
             expectation=lambda res: all(x in res.get('addons', []) for x in self.options.to_add),
@@ -623,7 +631,12 @@ class SyspurposeCommand(CliCommand):
         )
 
     def _add(self, to_add):
-        raise NotImplementedError("To be implemented in subclasses")
+        if not isinstance(to_add, list):
+            to_add = [to_add]
+
+        if self.store:
+            for item in to_add:
+                self.store.add(self.attr, item)
 
     def remove(self):
         self._remove(self.options.to_remove)
@@ -638,7 +651,12 @@ class SyspurposeCommand(CliCommand):
         )
 
     def _remove(self, to_remove):
-        raise NotImplementedError("To be implemented in subclasses")
+        if not isinstance(to_remove, list):
+            to_remove = [to_remove]
+
+        if self.store:
+            for item in to_remove:
+                self.store.remove(self.attr, item)
 
     def show(self):
         if self.is_registered():
@@ -675,9 +693,8 @@ class SyspurposeCommand(CliCommand):
             print(_("Note: The currently configured entitlement server does not support System Purpose {attr}.".format(attr=attr)))
 
     def _check_result(self, expectation, success_msg, command, attr):
-        result = None
-        if self.is_registered():
-            result = syspurposelib.SyspurposeSyncActionCommand(self.attr).perform(include_result=True)[1]
+        self.store.finish()
+        result = self.store.local_contents
 
         if result and not expectation(result):
             advice = SP_ADVICE.format(command=command)
@@ -1088,8 +1105,15 @@ class ServiceLevelCommand(SyspurposeCommand, OrgCommand):
             else:
                 self.show_service_level()
 
+    def set(self):
+        if self.cp.has_capability("syspurpose"):
+            super(ServiceLevelCommand, self).set()
+        else:
+            # TODO Find old impl of service level command.
+            pass
+
     def _set(self, service_level):
-        save_sla_to_syspurpose_metadata(service_level)
+        self.store.set(self.attr, service_level)
 
     def show_service_level(self):
         consumer = self.cp.getConsumer(self.identity.uuid)
@@ -1136,9 +1160,6 @@ class UsageCommand(SyspurposeCommand):
         shortdesc = _("Manage usage setting for this system")
         self._org_help_text = _("use set and unset to define the value for this field")
         super(UsageCommand, self).__init__("usage", shortdesc, False, attr='usage', commands=('set', 'unset'))
-
-    def _set(self, usage):
-        save_usage_to_syspurpose_metadata(usage)
 
 
 class RegisterCommand(UserPassCommand):
@@ -1496,14 +1517,6 @@ class AddonsCommand(SyspurposeCommand):
         shortdesc = _("Modify or view the addons attribute of the system purpose")
         super(AddonsCommand, self).__init__("addons", shortdesc=shortdesc, primary=False,
                                             attr='addons', commands=['unset', 'add', 'remove'])
-
-    def _remove(self, val):
-        syspurposelib.remove_all("addons", val)
-        syspurposelib.write()
-
-    def _add(self, val):
-        syspurposelib.add_all("addons", val)
-        syspurposelib.write()
 
 
 class RedeemCommand(CliCommand):
@@ -2783,9 +2796,6 @@ class RoleCommand(SyspurposeCommand):
         self.check_syspurpose_support('role')
         if self.options.set and self.options.unset:
             system_exit(os.EX_USAGE, _("Error: Options --set and --unset of role subcommand are mutually exclusive."))
-
-    def _set(self, val):
-        save_role_to_syspurpose_metadata(val)
 
 
 class VersionCommand(CliCommand):

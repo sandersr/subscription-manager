@@ -39,15 +39,14 @@ except ImportError:
         return read_syspurpose()
 
 try:
-    from syspurpose.files import SyspurposeStore, USER_SYSPURPOSE
+    from syspurpose.files import UserSyspurposeStore
 except ImportError:
     log.debug("Could not import from module syspurpose.")
-    SyspurposeStore = None
+    UserSyspurposeStore = None
     USER_SYSPURPOSE = "/etc/rhsm/syspurpose/syspurpose.json"
 
 store = None
 syspurpose = None
-
 
 def save_sla_to_syspurpose_metadata(service_level):
     """
@@ -58,7 +57,7 @@ def save_sla_to_syspurpose_metadata(service_level):
     :type service_level: str
     """
 
-    if 'SyspurposeStore' in globals() and SyspurposeStore is not None:
+    if 'SyspurposeStore' in globals() and UserSyspurposeStore is not None:
         store = SyspurposeStore.read(USER_SYSPURPOSE)
 
         # if empty, set it to null
@@ -125,8 +124,10 @@ def get_sys_purpose_store():
     global store
     if store is not None:
         return store
-    elif SyspurposeStore is not None:
-        store = SyspurposeStore.read(USER_SYSPURPOSE)
+    elif UserSyspurposeStore is not None:
+        uep = inj.require(inj.CP_PROVIDER).get_consumer_auth_cp()
+        uuid = inj.require(inj.IDENTITY).uuid
+        store = UserSyspurposeStore(uep, consumer_uuid=uuid)
     return store
 
 
@@ -208,7 +209,7 @@ def write():
     """
     store = get_sys_purpose_store()
     if store is not None:
-        return store.write()
+        return store.finish()
 
 
 def read_syspurpose(raise_on_error=False):
@@ -239,8 +240,8 @@ def write_syspurpose(values):
     :param values:
     :return:
     """
-    if SyspurposeStore is not None:
-        sp = SyspurposeStore(USER_SYSPURPOSE)
+    if UserSyspurposeStore is not None:
+        sp = UserSyspurposeStore()
         sp.contents = values
         sp.write()
     else:
@@ -318,7 +319,11 @@ class SyspurposeSyncActionCommand(object):
         consumer_uuid = inj.require(inj.IDENTITY).uuid
 
         try:
-            result = sync(self.uep, consumer_uuid, command=self.command, report=self.report)
+            store = UserSyspurposeStore(uep=self.uep,
+                                        consumer_uuid=consumer_uuid,
+                                        report=self.report,
+                                        on_changed=self.report.record_change)
+            result = store.sync()
         except ConnectionException as e:
             self.report._exceptions.append('Unable to sync syspurpose with server: %s' % str(e))
             self.report._status = 'Failed to sync system purpose'
