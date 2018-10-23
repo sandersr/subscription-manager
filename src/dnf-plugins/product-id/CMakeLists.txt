@@ -55,13 +55,5 @@ install(TARGETS product-id LIBRARY DESTINATION /usr/lib64/libdnf/plugins)
 
 enable_testing()
 add_executable(test-productdb test-productdb.c)
-target_link_libraries(test-productdb
-    ${GLIB_LIBRARIES}
-    # ${LIBDNF_LINK_LIBRARIES}
-    ${LIBDNF_LIBRARIES}
-    ${ZLIB_LIBRARIES}
-    ${OPENSSL_LIBRARIES}
-    ${JSONC_LIBRARIES}
-    product-id
-)
+target_link_libraries(test-productdb product-id)
 add_test(productdb test-productdb)
