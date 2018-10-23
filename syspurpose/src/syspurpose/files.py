@@ -359,6 +359,9 @@ class SyncedStore(object):
         if key == 'service_level_agreement':
             value = self.local_contents.get(key, None)
             self.local_contents[key] = ''
+        elif key == 'addons':
+            value = self.local_contents.get(key, None)
+            self.local_contents[key] = []
         else:
             value = self.local_contents.pop(key, None)
         self.changed = True
