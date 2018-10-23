@@ -136,7 +136,7 @@ int removeUnusedProductCerts(GHashTable *repoMap) {
                 if(g_str_has_suffix(file_name, ".pem") == TRUE) {
                     gchar *product_id = g_strndup(file_name, strlen(file_name) - 4);
                     gboolean is_num = TRUE;
-                    // Test if string represent number
+                    // Test if string represents number
                     for(int i=0; i<strlen(product_id); i++) {
                         if (g_ascii_isdigit(product_id[i]) != TRUE) {
                             is_num = FALSE;
@@ -159,10 +159,11 @@ int removeUnusedProductCerts(GHashTable *repoMap) {
                     }
                     g_free(product_id);
                 }
-            } else if (errno != 0 && errno != ENODATA) {
+            } else if (errno != 0 && errno != ENODATA && errno != EEXIST) {
                 error("Unable to read content of %s directory, %d, %s", PRODUCT_CERT_DIR, errno, strerror(errno));
             }
         } while(file_name != NULL);
+        g_dir_close(productDir);
     } else {
         printError("Unable to open directory with product certificates", tmp_err);
     }
@@ -240,7 +241,7 @@ int pluginHook(PluginHandle *handle, PluginHookId id, void *hookData, PluginHook
                 LrYumRepoMdRecord *repoMdRecord = lr_yum_repomd_get_record(repoMd, "productid");
                 if (repoMdRecord) {
                     debug("Repository %s has a productid", dnf_repo_get_id(repo));
-                    RepoProductId *repoProductId = malloc(sizeof(RepoProductId));
+                    RepoProductId *repoProductId = (RepoProductId*)malloc(sizeof(RepoProductId));
                     int fetchSuccess = fetchProductId(repo, repoProductId);
                     if(fetchSuccess == 1) {
                         g_ptr_array_add(repoAndProductIds, repoProductId);
@@ -318,6 +319,7 @@ void writeRepoMap(GHashTable *repoMap) {
         error("Unable to write productdb to file: %s", PRODUCTDB_FILE);
     }
 
+    g_list_free(keys);
     json_object_put(productIdDb);
 }
 
@@ -423,6 +425,7 @@ void getActive(DnfContext *context, const GPtrArray *repoAndProductIds, GPtrArra
 
     g_ptr_array_unref(installedPackages);
     g_ptr_array_unref(packageList);
+    g_object_unref(rpmDbSack);
 }
 
 void printError(const char *msg, GError *err) {
@@ -554,7 +557,6 @@ int installProductId(RepoProductId *repoProductId, GHashTable *repoMap) {
                 ));
 
                 ret = 1;
-
             } else {
                 error("Unable write to file with certificate file :%s", outname->str);
             }
@@ -629,6 +631,8 @@ int findProductId(GString *certContent, GString *result) {
         }
     }
 
+    X509_free(x509);
+
     return 1;
 }
 
@@ -667,5 +671,6 @@ int decompress(gzFile input, GString *output) {
 }
 
 void clearMyTable(gpointer key, gpointer value, gpointer data) {
+    g_free(key);
     g_slist_free(value);
 }
