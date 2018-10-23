@@ -23,7 +23,6 @@ It contains methods for accessing/manipulating the local syspurpose.json metadat
 """
 
 from rhsm.connection import ConnectionException
-from subscription_manager.cache import SyspurposeCache
 from subscription_manager import certlib
 from subscription_manager import injection as inj
 

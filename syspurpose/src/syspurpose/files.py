@@ -19,12 +19,13 @@ from __future__ import print_function, division, absolute_import
 This module contains utilities for manipulating files pertaining to system syspurpose
 """
 
+import collections
+import logging
 import json
 import os
 import io
 from syspurpose.utils import system_exit, create_dir, create_file, make_utf8, write_to_file_utf8
 from syspurpose.i18n import ugettext as _
-from syspurpose.sync import three_way_merge
 
 # Constants for locations of the two system syspurpose files
 USER_SYSPURPOSE = "/etc/rhsm/syspurpose/syspurpose.json"
@@ -47,6 +48,9 @@ LOCAL_TO_REMOTE = {
 
 # All known syspurpose attributes
 ATTRIBUTES = [ROLE, ADDONS, SERVICE_LEVEL, USAGE]
+
+
+log = logging.getLogger(__name__)
 
 
 class SyspurposeStore(object):
@@ -229,23 +233,21 @@ class SyncedStore(object):
         self.cache_contents = {}
         self.changed = False
         self.on_changed = on_changed
+        self.remote_updated = False
+        self.local_updated = False
+        self.cache_updated = False
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.finsh()
-
-    def start(self):
-        self.local_file = open(self.path, 'w', encoding='utf-8')
-        self.cache_file = open(self.path, 'w', encoding='utf-8')
-        return self
+        self.finish()
 
     def finish(self):
         if self.changed:
             self.sync()
-        self.local_file.close()
-        self.cache_file.close()
+            return True
+        return False
 
     def sync(self):
         local_contents = self.get_local_contents()
@@ -256,9 +258,9 @@ class SyncedStore(object):
                             remote=remote_contents,
                             base=cached_contents)
 
-        self.update_local(result)
-        self.update_cache(result)
-        self.update_remote(result)
+        self.local_updated = self.update_local(result)
+        self.cache_updated = self.update_cache(result)
+        self.remote_updated = self.update_remote(result)
 
         # Reset the changed attribute as all items should be synced if we've gotten to this point
         self.changed = False
@@ -280,9 +282,11 @@ class SyncedStore(object):
 
     def update_local(self, data):
         write_to_file_utf8(self.local_file, data)
+        return True
 
     def update_cache(self, data):
         write_to_file_utf8(self.cache_file, data)
+        return True
 
     def update_remote(self, data):
         raise NotImplemented("To be implemented in subclasses")
@@ -353,9 +357,7 @@ class SyncedStore(object):
             self.local_contents[key] = ''
         else:
             value = self.local_contents.pop(key, None)
-
-        if value is not None:
-            self.changed = True
+        self.changed = True
 
         return value is not None
 
@@ -378,16 +380,53 @@ class SyncedStore(object):
 
         return org != value or org is None
 
+    @staticmethod
+    def update_file(path, data):
+        """
+        Write the contents of data to file in the first mode we can (effectively to create or update
+        the file)
+        :param path: The string path to the file location we should update
+        :param data: The data to write to the file
+        :return: None
+        """
+        modes = ['x', 'w']
+        for mode in modes:
+            try:
+                f = open(path, mode, encoding='utf-8')
+            except OSError as e:
+                if e.errno != 17:
+                    raise
+            else:
+                write_to_file_utf8(f, data)
+                f.flush()
+                f.close()
+                return True
+        return False
+
 
 class JsonSyncedStore(SyncedStore):
 
     def get_local_contents(self):
-        self.local_file = open(self.path, 'w', encoding='utf-8')
-        return json.load(self.local_file)
+        if not self.local_contents:
+            try:
+                self.local_contents = json.load(open(self.path, 'r', encoding='utf-8'))
+            except ValueError:
+                self.local_contents = {}
+        return self.local_contents
+
+    def update_local(self, data):
+        return self.update_file(self.path, data)
+
+    def update_cache(self, data):
+        return self.update_file(self.cache_path, data)
 
     def get_cached_contents(self):
-        self.cache_file = open(self.path, 'w', encoding='utf-8')
-        return json.load(self.cache_file)
+        if not self.cache_contents:
+            try:
+                self.cache_contents = json.load(open(self.cache_path, 'r', encoding='utf-8'))
+            except ValueError:
+                self.cache_contents = {}
+        return self.cache_contents
 
 
 class UserSyspurposeStore(JsonSyncedStore):
@@ -408,7 +447,24 @@ class UserSyspurposeStore(JsonSyncedStore):
 
         return result
 
+    def get_local_contents(self):
+        try:
+            return super(UserSyspurposeStore, self).get_local_contents()
+        except (os.error, ValueError):
+            if self.report is not None:
+                self.report._exceptions.append(
+                        'Cannot read local syspurpose, trying to update from server only'
+                )
+            log.debug('Unable to read local system purpose at  \'%s\'\nUsing the server values.'
+                      % USER_SYSPURPOSE)
+
     def get_remote_contents(self):
+        if self.uep is None or self.consumer_uuid is None:
+            return {}
+        if not self.uep.has_capability('syspurpose'):
+            log.debug('Server does not support syspurpose, not syncing')
+            return {}
+
         consumer = self.uep.getConsumer(self.consumer_uuid)
         result = {}
 
@@ -421,6 +477,9 @@ class UserSyspurposeStore(JsonSyncedStore):
         return result
 
     def update_remote(self, data):
+        if self.uep is None or self.consumer_uuid is None:
+            return False
+
         addons = data.get(ADDONS)
         self.uep.updateConsumer(
                 self.consumer_uuid,
@@ -429,6 +488,7 @@ class UserSyspurposeStore(JsonSyncedStore):
                 service_level=data.get(SERVICE_LEVEL) or "",
                 usage=data.get(USAGE) or ""
         )
+        return True
 
 
 def read_syspurpose(raise_on_error=False):
@@ -451,3 +511,89 @@ def read_syspurpose(raise_on_error=False):
                 raise
             syspurpose = {}
     return syspurpose
+
+
+# A simple container class used to hold the values representing a change detected
+# during three_way_merge
+DiffChange = collections.namedtuple('DiffChange', ['key', 'previous_value', 'new_value', 'source', 'in_base', 'in_result'])
+
+
+def three_way_merge(local, base, remote, on_conflict="remote", on_change=None):
+    """
+    Performs a three-way merge on the local and remote dictionaries with a given base.
+    :param local: The dictionary of the current local values
+    :param base: The dictionary with the values we've last seen
+    :param remote: The dictionary with "their" values
+    :param on_conflict: Either "remote" or "local" or None. If "remote", the remote changes
+                               will win any conflict. If "local", the local changes will win any
+                               conflict. If anything else, an error will be thrown.
+    :param on_change: This is an optional function which will be given each change as it is
+                      detected.
+    :return: The dictionary of values as merged between the three provided dictionaries.
+    """
+    result = {}
+    local = local or {}
+    base = base or {}
+    remote = remote or {}
+
+    if on_conflict == "remote":
+        winner = remote
+    elif on_conflict == "local":
+        winner = local
+    else:
+        raise ValueError('keyword argument "on_conflict" must be either "remote" or "local"')
+
+    if on_change is None:
+        on_change = lambda change: change
+
+    all_keys = set(local.keys()) | set(base.keys()) | set(remote.keys())
+
+    for key in all_keys:
+
+        local_changed = detect_changed(base=base, other=local, key=key)
+        remote_changed = detect_changed(base=base, other=remote, key=key)
+        changed = local_changed or remote_changed
+        source = 'base'
+
+        if local_changed == remote_changed:
+            source = on_conflict
+            if key in winner:
+                result[key] = winner[key]
+        elif remote_changed:
+            source = 'remote'
+            if key in remote:
+                result[key] = remote[key]
+        elif local_changed:
+            source = 'local'
+            if key in local:
+                result[key] = local[key]
+
+        if changed:
+            original = base.get(key)
+            diff = DiffChange(key=key, source=source, previous_value=original,
+                              new_value=result.get(key), in_base=key in base,
+                              in_result=key in result)
+            on_change(diff)
+
+    return result
+
+
+def detect_changed(base, other, key):
+    """
+    Detect the type of change that has occurred between base and other for a given key.
+    :param base: The dictionary of values we are starting with
+    :param other: The dictionary of now current values
+    :param key: The key that we are interested in knowing how it changed
+    :return: True if there was a change, false if there was no change
+    :rtype: bool
+    """
+    base = base or {}
+    other = other or {}
+
+    if key not in other.keys():
+        return False
+
+    base_val = base.get(key)
+    other_val = other.get(key)
+
+    return base_val != other_val

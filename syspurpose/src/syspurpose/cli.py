@@ -16,8 +16,7 @@ from __future__ import print_function, division, absolute_import
 # in this software or its documentation.
 
 import argparse
-from syspurpose.files import SyspurposeStore, USER_SYSPURPOSE
-from syspurpose.sync import SyspurposeSync
+from syspurpose.files import UserSyspurposeStore
 from syspurpose.utils import in_container, make_utf8
 from syspurpose.i18n import ugettext as _
 import json
@@ -85,7 +84,7 @@ def show_contents(args, syspurposestore):
     :return:
     """
 
-    contents = syspurposestore.contents
+    contents = syspurposestore.get_local_contents()
     print(json.dumps(contents, indent=2, ensure_ascii=False))
 
 
@@ -248,24 +247,29 @@ def main():
         print(_("WARNING: Setting syspurpose in containers has no effect."
               "Please run syspurpose on the host.\n"))
 
-    syspurposestore = SyspurposeStore.read(USER_SYSPURPOSE)
+    try:
+        from subscription_manager.identity import Identity
+        from subscription_manager.cp_provider import CPProvider
+        identity = Identity()
+        uuid = identity.uuid
+        uep = CPProvider().get_consumer_auth_cp()
+    except ImportError:
+        uuid = None
+        uep = None
+        print(_("Warning: Unable to sync system purpose with subscription management server:"
+                " subscription_manager module is not available."))
 
+    syspurposestore = UserSyspurposeStore(uep=uep, consumer_uuid=uuid)
     if args.func is not None:
         args.func(args, syspurposestore)
     else:
         parser.print_help()
+        return 0
 
-    if args.requires_write:
-        syspurposestore.write()
-
-        try:
-            syspurpose_sync = SyspurposeSync()
-        except ImportError:
-            print(_("Warning: Unable to sync system purpose with subscription management server: rhsm module is not available."))
+    if syspurposestore.finish():
+        if syspurposestore.remote_updated:
+            print(_("System purpose successfully sent to subscription management server."))
         else:
-            ret = syspurpose_sync.send_syspurpose_to_candlepin(syspurposestore)
-            if ret:
-                print(_("System purpose successfully sent to subscription management server."))
-            else:
-                print(_("Unable to send system purpose to subscription management server"))
+            print(_("Unable to send system purpose to subscription management server"))
+
     return 0
