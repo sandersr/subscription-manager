@@ -214,6 +214,7 @@ int pluginHook(PluginHandle *handle, PluginHookId id, void *hookData, PluginHook
             pinfo.name, pinfo.version, strHookId(id), handle->version);
 
     if (id == PLUGIN_HOOK_ID_CONTEXT_TRANSACTION) {
+        // Get DNF context
         DnfContext *dnfContext = handle->initData;
         // List of all repositories
         GPtrArray *repos = dnf_context_get_repos(dnfContext);
@@ -242,6 +243,15 @@ int pluginHook(PluginHandle *handle, PluginHookId id, void *hookData, PluginHook
                 if (repoMdRecord) {
                     debug("Repository %s has a productid", dnf_repo_get_id(repo));
                     RepoProductId *repoProductId = (RepoProductId*)malloc(sizeof(RepoProductId));
+                    // TODO: do not fetch productid certificate, when dnf context is
+                    // set to cache-only mode. Microdnf not package do not support this
+                    // feature ATM
+                    gboolean cache_only = dnf_context_get_cache_only(dnfContext);
+                    if (cache_only == TRUE) {
+                        debug("DNF context is set to: cache-only");
+                    } else {
+                        debug("DNF context is NOT set to: cache-only");
+                    }
                     int fetchSuccess = fetchProductId(repo, repoProductId);
                     if(fetchSuccess == 1) {
                         g_ptr_array_add(repoAndProductIds, repoProductId);
@@ -433,6 +443,10 @@ void printError(const char *msg, GError *err) {
     g_error_free(err);
 }
 
+static void copy_lr_val(LrVar *lr_val, LrUrlVars **newVarSubst) {
+    *newVarSubst = lr_urlvars_set(*newVarSubst, lr_val->var, lr_val->val);
+}
+
 int fetchProductId(DnfRepo *repo, RepoProductId *repoProductId) {
     int ret = 0;
     GError *tmp_err = NULL;
@@ -453,11 +467,16 @@ int fetchProductId(DnfRepo *repo, RepoProductId *repoProductId) {
     }
 
     // Getting information about variable substitution
-    LrUrlVars *var_subst = NULL;
-    lr_handle_getinfo(lrHandle, &tmp_err, LRI_VARSUB, &var_subst);
+    LrUrlVars *varSubst = NULL;
+    lr_handle_getinfo(lrHandle, &tmp_err, LRI_VARSUB, &varSubst);
     if (tmp_err) {
         printError("Unable to get variable substitution for URL", tmp_err);
     }
+
+    // It is necessary to create copy of list of URL variables to avoid memory leaks
+    // Two handles cannot share same GSList
+    LrUrlVars *newVarSubst = NULL;
+    g_slist_foreach(varSubst, (GFunc)copy_lr_val, &newVarSubst);
 
     /* Set information on our LrHandle instance.  The LRO_UPDATE option is to tell the LrResult to update the
      * repo (i.e. download missing information) rather than attempt to replace it.
@@ -472,7 +491,7 @@ int fetchProductId(DnfRepo *repo, RepoProductId *repoProductId) {
     lr_handle_setopt(h, NULL, LRO_URLS, urls);
     lr_handle_setopt(h, NULL, LRO_REPOTYPE, LR_YUMREPO);
     lr_handle_setopt(h, NULL, LRO_DESTDIR, destdir);
-    lr_handle_setopt(h, NULL, LRO_VARSUB, var_subst);
+    lr_handle_setopt(h, NULL, LRO_VARSUB, newVarSubst);
     lr_handle_setopt(h, NULL, LRO_UPDATE, TRUE);
 
     if(urls != NULL) {
