@@ -84,7 +84,7 @@ def show_contents(args, syspurposestore):
     :return:
     """
 
-    contents = syspurposestore.get_local_contents()
+    contents = syspurposestore.sync()
     print(json.dumps(contents, indent=2, ensure_ascii=False))
 
 

@@ -422,9 +422,11 @@ class JsonSyncedStore(SyncedStore):
         return self.local_contents
 
     def update_local(self, data):
+        self.local_contents = data
         return self.update_file(self.path, data)
 
     def update_cache(self, data):
+        self.cache_contents = data
         return self.update_file(self.cache_path, data)
 
     def get_cached_contents(self):

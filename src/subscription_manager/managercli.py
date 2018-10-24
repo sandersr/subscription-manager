@@ -64,8 +64,7 @@ from subscription_manager.exceptions import ExceptionMapper
 from subscription_manager.printing_utils import columnize, format_name, \
         none_wrap_columnize_callback, echo_columnize_callback, highlight_by_filter_string_columnize_cb
 from subscription_manager.utils import generate_correlation_id
-from subscription_manager.syspurposelib import save_sla_to_syspurpose_metadata, \
-        save_role_to_syspurpose_metadata, save_usage_to_syspurpose_metadata
+from subscription_manager.syspurposelib import save_sla_to_syspurpose_metadata
 
 from subscription_manager.i18n import ungettext, ugettext as _
 
@@ -694,8 +693,7 @@ class SyspurposeCommand(CliCommand):
 
     def _check_result(self, expectation, success_msg, command, attr):
         self.store.finish()
-        result = self.store.local_contents
-
+        result = self.store.get_cached_contents()
         if result and not expectation(result):
             advice = SP_ADVICE.format(command=command)
             system_exit(os.EX_SOFTWARE, msgs=_(SP_CONFLICT_MESSAGE.format(attr=attr, advice=advice)))
@@ -1297,7 +1295,7 @@ class RegisterCommand(UserPassCommand):
                 log.info("Registering as existing consumer: %s" % self.options.consumerid)
                 consumer = service.register(None, consumerid=self.options.consumerid,
                                             role=syspurpose.get('role') or '',
-                                            addons=syspurpose.get('addons') or [''],
+                                            addons=syspurpose.get('addons') or [],
                                             service_level=syspurpose.get('service_level_agreement') or '',
                                             usage=syspurpose.get('usage') or ''
                                             )
